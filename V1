@@ -1,265 +1,107 @@
 //@version=5
-indicator("Volume Profile Custom", overlay=true, max_boxes_count=500, max_lines_count=500)
+indicator("Wickless MA Strategy", overlay=true)
 
-// ==========================================
-// Inputs
-// ==========================================
-gp_profile  = "Volume Profile Settings"
-periodType  = input.string("Fixed Range", "Period Type", options=["Fixed Range", "Visible Range"], group=gp_profile)
-lookback    = input.int(200, "Fixed Range Lookback (bars)", minval=10, maxval=5000, group=gp_profile, tooltip="Only active if Period Type is 'Fixed Range'")
-rowsInput   = input.int(50, "Number of Rows (Bins)", minval=5, maxval=100, group=gp_profile)
-widthInput  = input.int(30, "Profile Width (bars)", minval=5, maxval=200, group=gp_profile)
-offsetInput = input.int(0, "Horizontal Offset (bars)", minval=0, group=gp_profile)
-hvnThresh   = input.float(70.0, "HVN Threshold (%)", minval=1.0, maxval=100.0, group=gp_profile, tooltip="Volume nodes exceeding this percentage of Max Volume are marked as High Value Nodes")
+// =============================================================================
+// INPUTS
+// =============================================================================
+grpMA = "Moving Average Settings"
+maTypeFast = input.string("SMA", "Fast MA Type", options=["SMA", "EMA", "WMA", "VWAP", "Anchored VWAP", "HMA"], group=grpMA)
+maLengthFast = input.int(10, "Fast MA Length", minval=1, group=grpMA)
 
-gp_colors   = "Color Settings"
-upColor     = input.color(color.new(#26a69a, 60), "Up Volume Color", group=gp_colors)
-downColor   = input.color(color.new(#ef5350, 60), "Down Volume Color", group=gp_colors)
-hvnUpColor  = input.color(color.new(#ffca28, 40), "HVN Up Color", group=gp_colors)
-hvnDownColor= input.color(color.new(#ff8f00, 40), "HVN Down Color", group=gp_colors)
+maTypeSlow = input.string("SMA", "Slow MA Type", options=["SMA", "EMA", "WMA", "VWAP", "Anchored VWAP", "HMA"], group=grpMA)
+maLengthSlow = input.int(50, "Slow MA Length", minval=1, group=grpMA)
 
-gp_poc      = "Point of Control (POC)"
-showFixedPOC = input.bool(true, "Show Fixed POC Line", group=gp_poc)
-fixedPocCol = input.color(color.red, "Fixed POC Color", group=gp_poc)
-showRollPOC  = input.bool(true, "Show Rolling POC", group=gp_poc)
-rollPocCol   = input.color(color.blue, "Rolling POC Color", group=gp_poc)
-rollPocLen   = input.int(50, "Rolling POC Length (bars)", minval=5, maxval=500, group=gp_poc)
-showRollMA   = input.bool(true, "Show Rolling POC MA Line", group=gp_poc)
-maLength     = input.int(20, "Rolling POC MA Length", minval=2, group=gp_poc)
-maType       = input.string("EMA", "Rolling POC MA Type", options=["SMA", "EMA", "WMA"], group=gp_poc)
-rollMaCol    = input.color(color.orange, "Rolling POC MA Color", group=gp_poc)
+grpWick = "Wickless Candle Settings"
+strictnessMult = input.float(2.0, "Wickless Ratio Strictness", minval=0.1, step=0.5, tooltip="How much higher the Body-to-Wick ratio must be compared to the average. 2.0 means twice as wickless as the average candle.", group=grpWick)
+avgLookback = input.int(10, "Average Lookback Length", minval=1, group=grpWick)
 
-gp_volconf   = "Volume Confirmation"
-showVolConf  = input.bool(true, "Show Volume Confirmation Dashboard", group=gp_volconf)
-volMaLen     = input.int(20, "Volume MA Length", minval=2, group=gp_volconf)
-dashLoc      = input.string("top_right", "Dashboard Position", options=["top_right", "top_left", "bottom_right", "bottom_left"], group=gp_volconf)
+grpTF = "Timeframe Settings"
+tfMode = input.string("Current Timeframe", "Wickless Detection Mode", options=["Current Timeframe", "Higher Timeframe"], group=grpTF)
+htfRes = input.timeframe("60", "Higher Timeframe", group=grpTF)
 
-// ==========================================
-// Volume Confirmation Calculations
-// ==========================================
-volMA = ta.sma(volume, volMaLen)
-volAboveMA = volume > volMA
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+// MA Calculation Function
+getMA(type, length) =>
+    float ma = na
+    if type == "SMA"
+        ma := ta.sma(close, length)
+    else if type == "EMA"
+        ma := ta.ema(close, length)
+    else if type == "WMA"
+        ma := ta.wma(close, length)
+    else if type == "VWAP"
+        // Use Volume Weighted Moving Average (Rolling VWAP)
+        // If volume is 0 or not available on this asset, fallback to an SMA of hlc3 so it still plots
+        ma := nz(volume) == 0 ? ta.sma(hlc3, length) : ta.vwma(hlc3, length)
+    else if type == "Anchored VWAP"
+        // Built-in Session Anchored VWAP (ignores the length parameter)
+        ma := ta.vwap
+    else if type == "HMA"
+        ma := ta.hma(close, length)
+    ma
 
-// ==========================================
-// Global Drawings Storage
-// ==========================================
-var box[] profileBoxes = array.new_box()
-var line fixedPocLine = na
-
-// ==========================================
-// Helper Functions
-// ==========================================
-// Calculate rolling POC for a given length
-f_rolling_poc(int len, int rows) =>
-    float hi = ta.highest(high, len)
-    float lo = ta.lowest(low, len)
-    float step = hi == lo ? 0.0001 : (hi - lo) / rows
+is_candle_wickless(o, h, l, c, avgRatio) =>
+    body = math.abs(c - o)
+    topWick = h - math.max(o, c)
+    bottomWick = math.min(o, c) - l
+    totalWick = topWick + bottomWick
     
-    // Local array for rolling calculations
-    float[] rVolumes = array.new_float(rows, 0.0)
+    // Calculate Body-to-Wick Ratio
+    ratio = body / (totalWick == 0 ? syminfo.mintick : totalWick)
     
-    for i = 0 to len - 1
-        float barVol = nz(volume[i])
-        if barVol == 0
-            continue
-        float barHigh = high[i]
-        float barLow = low[i]
-        float barClose = close[i]
-        
-        if barHigh == barLow
-            int binIdx = math.min(rows - 1, math.max(0, math.floor((barClose - lo) / step)))
-            array.set(rVolumes, binIdx, array.get(rVolumes, binIdx) + barVol)
-        else
-            for j = 0 to rows - 1
-                float binMin = lo + j * step
-                float binMax = binMin + step
-                float overlapMin = math.max(barLow, binMin)
-                float overlapMax = math.min(barHigh, binMax)
-                if overlapMax > overlapMin
-                    float proportion = (overlapMax - overlapMin) / (barHigh - barLow)
-                    array.set(rVolumes, j, array.get(rVolumes, j) + barVol * proportion)
-                    
-    // Find POC bin
-    float maxVol = 0.0
-    int pocBinIdx = 0
-    for j = 0 to rows - 1
-        float v = array.get(rVolumes, j)
-        if v > maxVol
-            maxVol := v
-            pocBinIdx := j
-            
-    float rPocPrice = lo + pocBinIdx * step + (step / 2.0)
-    rPocPrice
-
-// ==========================================
-// Rolling POC Calculations
-// ==========================================
-rollingPoc = showRollPOC ? f_rolling_poc(rollPocLen, rowsInput) : na
-var float rollingPocMA = na
-
-if showRollPOC and showRollMA
-    if maType == "EMA"
-        rollingPocMA := ta.ema(rollingPoc, maLength)
-    else if maType == "WMA"
-        rollingPocMA := ta.wma(rollingPoc, maLength)
-    else
-        rollingPocMA := ta.sma(rollingPoc, maLength)
-
-plot(rollingPoc, "Rolling POC", color=rollPocCol, linewidth=1, style=plot.style_line)
-plot(rollingPocMA, "Rolling POC MA", color=rollMaCol, linewidth=2)
-
-// ==========================================
-// Right-Anchored Volume Profile Drawing
-// ==========================================
-if barstate.islast
-    // 1. Determine Starting Bar
-    int startBarIndex = na
-    if periodType == "Fixed Range"
-        startBarIndex := math.max(0, bar_index - lookback + 1)
-    else
-        // Search back for visible range start
-        for i = 0 to math.min(bar_index, 5000)
-            if time[i] < chart.left_visible_bar_time
-                startBarIndex := bar_index - i + 1
-                break
-        if na(startBarIndex)
-            startBarIndex := 0
-
-    // 2. Find High/Low Boundaries
-    float hi = high
-    float lo = low
-    int totalBars = bar_index - startBarIndex + 1
-    for i = 1 to totalBars - 1
-        hi := math.max(hi, high[i])
-        lo := math.min(lo, low[i])
-        
-    float step = hi == lo ? 0.0001 : (hi - lo) / rowsInput
-
-    // 3. Accumulate Volumes
-    float[] binVolumes = array.new_float(rowsInput, 0.0)
-    float[] binUpVolumes = array.new_float(rowsInput, 0.0)
-    float[] binDownVolumes = array.new_float(rowsInput, 0.0)
-
-    for i = 0 to totalBars - 1
-        float barVol = nz(volume[i])
-        if barVol == 0
-            continue
-        
-        float barHigh = high[i]
-        float barLow = low[i]
-        float barClose = close[i]
-        float barOpen = open[i]
-        bool isUp = barClose >= barOpen
-        
-        if barHigh == barLow
-            int binIdx = math.min(rowsInput - 1, math.max(0, math.floor((barClose - lo) / step)))
-            array.set(binVolumes, binIdx, array.get(binVolumes, binIdx) + barVol)
-            if isUp
-                array.set(binUpVolumes, binIdx, array.get(binUpVolumes, binIdx) + barVol)
-            else
-                array.set(binDownVolumes, binIdx, array.get(binDownVolumes, binIdx) + barVol)
-        else
-            for j = 0 to rowsInput - 1
-                float binMin = lo + j * step
-                float binMax = binMin + step
-                float overlapMin = math.max(barLow, binMin)
-                float overlapMax = math.min(barHigh, binMax)
-                
-                if overlapMax > overlapMin
-                    float proportion = (overlapMax - overlapMin) / (barHigh - barLow)
-                    float allocatedVol = barVol * proportion
-                    array.set(binVolumes, j, array.get(binVolumes, j) + allocatedVol)
-                    if isUp
-                        array.set(binUpVolumes, j, array.get(binUpVolumes, j) + allocatedVol)
-                    else
-                        array.set(binDownVolumes, j, array.get(binDownVolumes, j) + allocatedVol)
-
-    // 4. Find Max Volume (POC)
-    float maxVol = 0.0
-    int pocBinIdx = 0
-    for j = 0 to rowsInput - 1
-        float v = array.get(binVolumes, j)
-        if v > maxVol
-            maxVol := v
-            pocBinIdx := j
-
-    float pocPrice = lo + pocBinIdx * step + (step / 2.0)
-    float hvnThresholdVal = maxVol * (hvnThresh / 100.0)
-
-    // 5. Clean up old drawings
-    if array.size(profileBoxes) > 0
-        for b in profileBoxes
-            box.delete(b)
-        array.clear(profileBoxes)
-
-    // 6. Draw Profile Bins
-    int baseRight = bar_index + offsetInput
-    for j = 0 to rowsInput - 1
-        float v = array.get(binVolumes, j)
-        if v == 0
-            continue
-            
-        float upVol = array.get(binUpVolumes, j)
-        float downVol = array.get(binDownVolumes, j)
-        
-        int totalWidth = math.round(widthInput * (v / maxVol))
-        int upWidth = math.round(widthInput * (upVol / maxVol))
-        
-        float binBottom = lo + j * step
-        float binTop = binBottom + step
-        
-        bool isHVN = v >= hvnThresholdVal
-        
-        color currentUpColor = isHVN ? hvnUpColor : upColor
-        color currentDownColor = isHVN ? hvnDownColor : downColor
-        
-        // Draw Down Volume Box (Base)
-        int downLeft = baseRight - totalWidth
-        box downBox = box.new(
-             left=downLeft, top=binTop,
-             right=baseRight, bottom=binBottom,
-             bgcolor=currentDownColor, border_color=color.new(color.white, 100),
-             border_style=line.style_solid
-             )
-        array.push(profileBoxes, downBox)
-        
-        // Draw Up Volume Box (Overlayed)
-        if upWidth > 0
-            int upLeft = baseRight - upWidth
-            box upBox = box.new(
-                 left=upLeft, top=binTop,
-                 right=baseRight, bottom=binBottom,
-                 bgcolor=currentUpColor, border_color=color.new(color.white, 100),
-                 border_style=line.style_solid
-                 )
-            array.push(profileBoxes, upBox)
-
-    // 7. Draw Fixed POC Line
-    if showFixedPOC
-        if not na(fixedPocLine)
-            line.delete(fixedPocLine)
-        fixedPocLine := line.new(
-             x1=startBarIndex, y1=pocPrice,
-             x2=baseRight, y2=pocPrice,
-             color=fixedPocCol, width=2, style=line.style_solid
-             )
-
-// ==========================================
-// Volume Confirmation Dashboard Table
-// ==========================================
-var table volTable = na
-if barstate.islast and showVolConf
-    tablePos = dashLoc == "top_right" ? position.top_right :
-               dashLoc == "top_left" ? position.top_left :
-               dashLoc == "bottom_right" ? position.bottom_right :
-               position.bottom_left
-               
-    volTable := table.new(position=tablePos, columns=2, rows=2, bgcolor=color.new(color.black, 20), border_color=color.gray, border_width=1)
+    // It must be significantly above average to be considered wickless
+    isWickless = ratio > (avgRatio * strictnessMult)
     
-    // Header
-    table.cell(volTable, 0, 0, "Volume Confirmation", text_color=color.white, text_size=size.small, bgcolor=color.gray)
-    table.cell(volTable, 1, 0, volAboveMA ? "CONFIRMED" : "WEAK", text_color=color.white, text_size=size.small, bgcolor=volAboveMA ? color.new(color.green, 30) : color.new(color.red, 30))
+    bullishWickless = isWickless and (c > o)
+    bearishWickless = isWickless and (c < o)
     
-    // Values
-    table.cell(volTable, 0, 1, "Vol / MA", text_color=color.white, text_size=size.small)
-    table.cell(volTable, 1, 1, str.tostring(volume, "#.##") + " / " + str.tostring(volMA, "#.##"), text_color=color.white, text_size=size.small)
+    [bullishWickless, bearishWickless]
+
+// =============================================================================
+// CALCULATIONS
+// =============================================================================
+fastMA = getMA(maTypeFast, maLengthFast)
+slowMA = getMA(maTypeSlow, maLengthSlow)
+
+// Calculate Average Body-to-Wick Ratio for current TF
+body = math.abs(close - open)
+topWick = high - math.max(open, close)
+bottomWick = math.min(open, close) - low
+totalWick = topWick + bottomWick
+currentRatio = body / (totalWick == 0 ? syminfo.mintick : totalWick)
+avgBodyToWick = ta.sma(currentRatio, avgLookback)
+
+// Current Timeframe Logic
+[isWicklessBullishCTF, isWicklessBearishCTF] = is_candle_wickless(open, high, low, close, avgBodyToWick)
+
+// Higher Timeframe Logic (request.security evaluates the avgBodyToWick logic ON the higher timeframe!)
+[htfOpen, htfHigh, htfLow, htfClose, htfAvgRatio] = request.security(syminfo.tickerid, htfRes, [open, high, low, close, avgBodyToWick])
+[isWicklessBullishHTF, isWicklessBearishHTF] = is_candle_wickless(htfOpen, htfHigh, htfLow, htfClose, htfAvgRatio)
+
+// Determine which timeframe's wickless signals to use based on user selection
+isWicklessBullish = tfMode == "Current Timeframe" ? isWicklessBullishCTF : isWicklessBullishHTF
+isWicklessBearish = tfMode == "Current Timeframe" ? isWicklessBearishCTF : isWicklessBearishHTF
+
+// MA Conditions
+fastMAUp = fastMA > fastMA[1]
+fastMADown = fastMA < fastMA[1]
+
+// Buy/Sell Conditions
+buySignal = (fastMA > slowMA) and isWicklessBullish and fastMAUp and (close > fastMA)
+sellSignal = (fastMA < slowMA) and isWicklessBearish and fastMADown and (close < fastMA)
+
+// =============================================================================
+// PLOTTING
+// =============================================================================
+plot(fastMA, color=color.new(color.blue, 0), title="Fast MA", linewidth=2)
+plot(slowMA, color=color.new(color.red, 0), title="Slow MA", linewidth=2)
+
+// Background color for wickless candles to make them easy to spot manually
+bgcolor(isWicklessBullish ? color.new(color.green, 90) : na, title="Wickless Bullish Background")
+bgcolor(isWicklessBearish ? color.new(color.red, 90) : na, title="Wickless Bearish Background")
+
+// Plot Signals
+plotshape(buySignal, title="Buy Signal", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.small, text="BUY")
+plotshape(sellSignal, title="Sell Signal", location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.small, text="SELL")
