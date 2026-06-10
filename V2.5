@@ -1,0 +1,1581 @@
+//@version=5
+indicator("Wickless MA Strategy + Volume Profile", overlay=true, max_boxes_count=500, max_lines_count=500, max_bars_back=5000)
+
+// =============================================================================
+// WICKLESS MA INPUTS
+// =============================================================================
+grpMA = "Signal MA Settings"
+maTypeSignal = input.string("SMA", "Signal MA Type", options=["SMA", "EMA", "WMA", "VWAP", "Anchored VWAP", "HMA"], group=grpMA)
+maLengthSignal = input.int(10, "Signal MA Length", minval=1, group=grpMA)
+
+grpWick = "Wickless Candle Settings"
+strictnessMult = input.float(2.0, "Wickless Ratio Strictness", minval=0.1, step=0.5, tooltip="How much higher the Body-to-Wick ratio must be compared to the average.", group=grpWick)
+avgLookback = input.int(10, "Average Lookback Length", minval=1, group=grpWick)
+
+grpTF = "Timeframe Settings"
+tfMode = input.string("Current Timeframe", "Wickless Detection Mode", options=["Current Timeframe", "Higher Timeframe"], group=grpTF)
+htfRes = input.timeframe("60", "Higher Timeframe", group=grpTF)
+
+// =============================================================================
+// VOLUME PROFILE INPUTS
+// =============================================================================
+gp_profile  = "Volume Profile Settings"
+periodType  = input.string("Fixed Range", "Period Type", options=["Fixed Range", "Visible Range"], group=gp_profile)
+lookback    = input.int(200, "Fixed Range Lookback (bars)", minval=10, maxval=5000, group=gp_profile, tooltip="Only active if Period Type is 'Fixed Range'")
+rowsInput   = input.int(50, "Number of Rows (Bins)", minval=5, maxval=100, group=gp_profile)
+widthInput  = input.int(30, "Profile Width (bars)", minval=5, maxval=200, group=gp_profile)
+offsetInput = input.int(0, "Horizontal Offset (bars)", minval=0, group=gp_profile)
+hvnThresh   = input.float(70.0, "HVN Threshold (%)", minval=1.0, maxval=100.0, group=gp_profile, tooltip="Volume nodes exceeding this percentage of Max Volume are marked as High Value Nodes")
+
+gp_colors   = "Color Settings"
+upColor     = input.color(color.new(#26a69a, 60), "Up Volume Color", group=gp_colors)
+downColor   = input.color(color.new(#ef5350, 60), "Down Volume Color", group=gp_colors)
+hvnUpColor  = input.color(color.new(#ffca28, 40), "HVN Up Color", group=gp_colors)
+hvnDownColor= input.color(color.new(#ff8f00, 40), "HVN Down Color", group=gp_colors)
+
+gp_poc      = "Point of Control (POC)"
+showFixedPOC = input.bool(true, "Show Fixed POC Line", group=gp_poc)
+fixedPocCol = input.color(color.red, "Fixed POC Color", group=gp_poc)
+showRollPOC  = input.bool(true, "Show Rolling POC", group=gp_poc)
+rollPocCol   = input.color(color.blue, "Rolling POC Color", group=gp_poc)
+rollPocLen   = input.int(50, "Rolling POC Length (bars)", minval=5, maxval=500, group=gp_poc)
+showRollMA   = input.bool(true, "Show Rolling POC MA Line", group=gp_poc)
+maLength     = input.int(20, "Rolling POC MA Length", minval=2, group=gp_poc)
+maType       = input.string("EMA", "Rolling POC MA Type", options=["SMA", "EMA", "WMA"], group=gp_poc)
+rollMaCol    = input.color(color.orange, "Rolling POC MA Color", group=gp_poc)
+
+gp_opt       = "Auto Optimization Settings"
+autoOptimize = input.bool(false, "Enable Auto Optimization", group=gp_opt)
+optMethod    = input.string("Two-Stage (Fast)", "Optimization Method", options=["Two-Stage (Fast)", "Brute Force (Slow)"], group=gp_opt)
+optMetric    = input.string("Net P&L", "Optimize For", options=["Net P&L", "Win Rate", "Profit Factor", "Expectancy"], group=gp_opt)
+optLookback  = input.int(1000, "Optimization Lookback (Bars)", minval=100, maxval=5000, group=gp_opt)
+
+gp_opt_entry = "Auto Opt: Entry Signal"
+optOptimizeEntry = input.bool(true, "Optimize Entry Settings?", group=gp_opt_entry)
+optUseSMA    = input.bool(true,  "Use SMA", group=gp_opt_entry)
+optUseEMA    = input.bool(true,  "Use EMA", group=gp_opt_entry)
+optUseWMA    = input.bool(false, "Use WMA", group=gp_opt_entry)
+optUseHMA    = input.bool(true,  "Use HMA", group=gp_opt_entry)
+optUseVWAP   = input.bool(false, "Use VWAP", group=gp_opt_entry)
+optMaMin     = input.int(10, "MA Length Min", minval=1, group=gp_opt_entry)
+optMaMax     = input.int(50, "MA Length Max", minval=1, group=gp_opt_entry)
+optMaStep    = input.int(10, "MA Length Step", minval=1, group=gp_opt_entry)
+
+gp_opt_sl    = "Auto Opt: Stop Loss"
+optOptimizeSL= input.bool(true, "Optimize Exit/SL Settings?", group=gp_opt_sl)
+optUseSLSig  = input.bool(true, "Use Signal MA for SL", group=gp_opt_sl)
+optUseSLCus  = input.bool(false, "Use Custom MA for SL", group=gp_opt_sl)
+optUseSLAtr  = input.bool(true, "Use ATR for SL", group=gp_opt_sl)
+optUseSLLb   = input.bool(true, "Use Candle Lookback for SL", group=gp_opt_sl)
+optUseSLLvn  = input.bool(false, "Use VP LVN for SL", group=gp_opt_sl)
+optUseSLMPoc = input.bool(false, "Use Moving POC for SL", group=gp_opt_sl)
+optMinRR     = input.float(1.0, "Optimizer Min RR", minval=0.5, step=0.1, group=gp_opt_sl)
+optMaxRR     = input.float(3.0, "Optimizer Max RR", minval=1.0, step=0.1, group=gp_opt_sl)
+optRRStep    = input.float(0.5, "Optimizer RR Step", minval=0.1, step=0.1, group=gp_opt_sl)
+
+gp_dash      = "Dashboard Settings"
+showDash     = input.bool(true, "Show Results Dashboard", group=gp_dash)
+dashLoc      = input.string("top_right", "Dashboard Position", options=["top_right", "top_left", "bottom_right", "bottom_left"], group=gp_dash)
+dashSize     = input.string("Small", "Dashboard Size", options=["Tiny", "Small", "Normal", "Large", "Auto"], group=gp_dash)
+
+gp_risk      = "Risk Management"
+fixedRisk    = input.float(100.0, "Fixed $ Risk per Trade", minval=1.0, group=gp_risk)
+minSLDist    = input.float(1.0, "Minimum SL Distance (ATR Mult)", minval=0.1, step=0.1, group=gp_risk, tooltip="Prevents stop loss from being placed too close to entry.")
+
+gp_sltp      = "Stop Loss & Take Profit"
+slType       = input.string("Signal MA", "Stop Loss Mode", options=["Signal MA", "Custom MA", "ATR", "Candle Lookback", "Volume Profile LVN", "Moving POC"], group=gp_sltp)
+targetRR     = input.float(2.0, "Target Risk:Reward Ratio", minval=0.1, step=0.1, group=gp_sltp)
+
+slMaType     = input.string("SMA", "Custom MA Type", options=["SMA", "EMA", "HMA"], group=gp_sltp, tooltip="Only for Custom MA Stop Loss")
+slMaLen      = input.int(50, "Custom MA Length", minval=1, group=grpMA)
+
+atrLen       = input.int(14, "ATR Length", minval=1, group=gp_sltp)
+atrMult      = input.float(1.5, "ATR Multiplier", minval=0.1, step=0.1, group=gp_sltp)
+
+lbLen        = input.int(10, "Candle Lookback Length", minval=1, group=gp_sltp)
+lbMargin     = input.float(0.5, "Candle Margin (%)", minval=0.0, step=0.1, group=gp_sltp, tooltip="Margin percentage of price to add/subtract from the lowest low / highest high")
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+getMA(type, length) =>
+    float _sma = ta.sma(close, length)
+    float _ema = ta.ema(close, length)
+    float _wma = ta.wma(close, length)
+    float _sma_hlc3 = ta.sma(hlc3, length)
+    float _vwma_hlc3 = ta.vwma(hlc3, length)
+    float _vwap = ta.vwap
+    float _hma = ta.hma(close, length)
+    
+    float ma = na
+    if type == "SMA"
+        ma := _sma
+    else if type == "EMA"
+        ma := _ema
+    else if type == "WMA"
+        ma := _wma
+    else if type == "VWAP"
+        ma := nz(volume) == 0 ? _sma_hlc3 : _vwma_hlc3
+    else if type == "Anchored VWAP"
+        ma := _vwap
+    else if type == "HMA"
+        ma := _hma
+    ma
+
+is_candle_wickless(o, h, l, c, avgRatio) =>
+    body_val = math.abs(c - o)
+    topWick = h - math.max(o, c)
+    bottomWick = math.min(o, c) - l
+    totalWick = topWick + bottomWick
+    
+    ratio = body_val / (totalWick == 0 ? syminfo.mintick : totalWick)
+    isWickless = ratio > (avgRatio * strictnessMult)
+    
+    bullishWickless = isWickless and (c > o)
+    bearishWickless = isWickless and (c < o)
+    
+    [bullishWickless, bearishWickless]
+
+// VOLUME PROFILE: Calculate rolling LVN
+f_rolling_lvn(int len, int rows, float currentPrice, bool isLong) =>
+    float hi = ta.highest(high, len)
+    float lo = ta.lowest(low, len)
+    float rLvnPrice = na
+    
+    if not na(hi) and not na(lo)
+        float step_val = hi == lo ? 0.0001 : (hi - lo) / rows
+        float[] rVolumes = array.new_float(rows, 0.0)
+        
+        for i = 0 to len - 1
+            float barVol = nz(volume[i]) == 0 ? 1.0 : nz(volume[i])
+            float barHigh = high[i]
+            float barLow = low[i]
+            float barClose = close[i]
+            
+            if barHigh == barLow
+                int binIdx = math.min(rows - 1, math.max(0, math.floor((barClose - lo) / step_val)))
+                array.set(rVolumes, binIdx, array.get(rVolumes, binIdx) + barVol)
+            else
+                for j = 0 to rows - 1
+                    float binMin = lo + j * step_val
+                    float binMax = binMin + step_val
+                    float overlapMin = math.max(barLow, binMin)
+                    float overlapMax = math.min(barHigh, binMax)
+                    if overlapMax > overlapMin
+                        float proportion = (overlapMax - overlapMin) / (barHigh - barLow)
+                        array.set(rVolumes, j, array.get(rVolumes, j) + barVol * proportion)
+                        
+        float totalVol = 0.0
+        for j = 0 to rows - 1
+            totalVol += array.get(rVolumes, j)
+        float avgVol = totalVol / rows
+        
+        float closestLvnPrice = na
+        float minDistance = 9999999.9
+        
+        for j = 0 to rows - 1
+            float v = array.get(rVolumes, j)
+            float binPrice = lo + j * step_val + (step_val / 2.0)
+            
+            if v < avgVol * 0.75 // significantly lower than average
+                if isLong and binPrice < currentPrice
+                    float dist = currentPrice - binPrice
+                    if dist < minDistance
+                        minDistance := dist
+                        closestLvnPrice := binPrice
+                else if not isLong and binPrice > currentPrice
+                    float dist = binPrice - currentPrice
+                    if dist < minDistance
+                        minDistance := dist
+                        closestLvnPrice := binPrice
+                        
+        rLvnPrice := closestLvnPrice
+    rLvnPrice
+
+// VOLUME PROFILE: Calculate rolling POC
+f_rolling_poc(int len, int rows) =>
+    float hi = ta.highest(high, len)
+    float lo = ta.lowest(low, len)
+    float rPocPrice = na
+    
+    if not na(hi) and not na(lo)
+        float step_val = hi == lo ? 0.0001 : (hi - lo) / rows
+        float[] rVolumes = array.new_float(rows, 0.0)
+        
+        for i = 0 to len - 1
+            // Fallback to 1.0 if volume is 0 so it doesn't break on Forex/CFDs
+            float barVol = nz(volume[i]) == 0 ? 1.0 : nz(volume[i])
+            float barHigh = high[i]
+            float barLow = low[i]
+            float barClose = close[i]
+            
+            if barHigh == barLow
+                int binIdx = math.min(rows - 1, math.max(0, math.floor((barClose - lo) / step_val)))
+                array.set(rVolumes, binIdx, array.get(rVolumes, binIdx) + barVol)
+            else
+                for j = 0 to rows - 1
+                    float binMin = lo + j * step_val
+                    float binMax = binMin + step_val
+                    float overlapMin = math.max(barLow, binMin)
+                    float overlapMax = math.min(barHigh, binMax)
+                    if overlapMax > overlapMin
+                        float proportion = (overlapMax - overlapMin) / (barHigh - barLow)
+                        array.set(rVolumes, j, array.get(rVolumes, j) + barVol * proportion)
+                        
+        float maxVol = 0.0
+        int pocBinIdx = 0
+        for j = 0 to rows - 1
+            float v = array.get(rVolumes, j)
+            if v > maxVol
+                maxVol := v
+                pocBinIdx := j
+                
+        rPocPrice := lo + pocBinIdx * step_val + (step_val / 2.0)
+    rPocPrice
+
+
+// =============================================================================
+// GLOBAL AUTO-OPTIMIZATION STATE VARIABLES
+// =============================================================================
+var string best_ma_type = "SMA"
+var int best_ma_length = 10
+var string best_sl_type = "Signal MA"
+var float best_rr = 2.0
+var float best_metric_val = 0.0
+var int best_t_idx = 0
+var int best_l_idx = 0
+var int best_s_idx = 0
+var float best_r_val = 2.0
+var int max_lookback = 1000
+var int debug_bf_evaluated = 0
+var int debug_bf_total = 0
+var float debug_opt_metric = 0.0
+
+// Global arrays for parallel brute force optimization
+int rrSteps = int(math.max(1.0, math.floor((optMaxRR - optMinRR) / optRRStep) + 1))
+int total_combos = 3 * 4 * 7 * rrSteps
+
+
+var float opt_active_sl = na
+var float opt_active_tp = na
+var bool opt_active = false
+
+// =============================================================================
+// WICKLESS MA CALCULATIONS & PLOTTING
+// =============================================================================
+optSignalMA = getMA(best_ma_type, best_ma_length)
+
+signalMA = getMA(maTypeSignal, maLengthSignal)
+slowMA = ta.vwap
+
+body_size = math.abs(close - open)
+topWick = high - math.max(open, close)
+bottomWick = math.min(open, close) - low
+totalWick = topWick + bottomWick
+currentRatio = body_size / (totalWick == 0 ? syminfo.mintick : totalWick)
+avgBodyToWick = ta.sma(currentRatio, avgLookback)
+
+[isWicklessBullishCTF, isWicklessBearishCTF] = is_candle_wickless(open, high, low, close, avgBodyToWick)
+
+[htfOpen, htfHigh, htfLow, htfClose, htfAvgRatio] = request.security(syminfo.tickerid, htfRes, [open, high, low, close, avgBodyToWick])
+[isWicklessBullishHTF, isWicklessBearishHTF] = is_candle_wickless(htfOpen, htfHigh, htfLow, htfClose, htfAvgRatio)
+
+isWicklessBullish = tfMode == "Current Timeframe" ? isWicklessBullishCTF : isWicklessBullishHTF
+isWicklessBearish = tfMode == "Current Timeframe" ? isWicklessBearishCTF : isWicklessBearishHTF
+
+signalMAUp = signalMA > signalMA[1]
+signalMADown = signalMA < signalMA[1]
+
+buySignal = (signalMA > slowMA) and isWicklessBullish and signalMAUp and (close > signalMA)
+sellSignal = (signalMA < slowMA) and isWicklessBearish and signalMADown and (close < signalMA)
+
+// Plot MA and VWAP lines (show optimized MA when autoOptimize is enabled)
+plot(autoOptimize ? optSignalMA : signalMA, color=color.new(color.blue, 0), title="Signal MA", linewidth=2)
+plot(slowMA, color=color.new(color.red, 0), title="Anchored VWAP (Slow MA)", linewidth=2)
+
+bgcolor(not autoOptimize and isWicklessBullish ? color.new(color.green, 90) : na, title="Wickless Bullish Background")
+bgcolor(not autoOptimize and isWicklessBearish ? color.new(color.red, 90) : na, title="Wickless Bearish Background")
+
+plotshape(not autoOptimize and buySignal[1], title="Buy Signal", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.small, text="BUY")
+plotshape(not autoOptimize and sellSignal[1], title="Sell Signal", location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.small, text="SELL")
+
+// Pre-calculate candidate values on every bar
+int l0 = optMaMin
+int l1 = optMaMin + optMaStep <= optMaMax ? optMaMin + optMaStep : optMaMin
+int l2 = optMaMin + 2*optMaStep <= optMaMax ? optMaMin + 2*optMaStep : optMaMin
+int l3 = optMaMin + 3*optMaStep <= optMaMax ? optMaMin + 3*optMaStep : optMaMin
+int l4 = optMaMin + 4*optMaStep <= optMaMax ? optMaMin + 4*optMaStep : optMaMin
+
+float ma_s0 = optOptimizeEntry and optUseSMA ? ta.sma(close, l0) : na
+float ma_s1 = optOptimizeEntry and optUseSMA ? ta.sma(close, l1) : na
+float ma_s2 = optOptimizeEntry and optUseSMA ? ta.sma(close, l2) : na
+float ma_s3 = optOptimizeEntry and optUseSMA ? ta.sma(close, l3) : na
+float ma_s4 = optOptimizeEntry and optUseSMA ? ta.sma(close, l4) : na
+
+float ma_e0 = optOptimizeEntry and optUseEMA ? ta.ema(close, l0) : na
+float ma_e1 = optOptimizeEntry and optUseEMA ? ta.ema(close, l1) : na
+float ma_e2 = optOptimizeEntry and optUseEMA ? ta.ema(close, l2) : na
+float ma_e3 = optOptimizeEntry and optUseEMA ? ta.ema(close, l3) : na
+float ma_e4 = optOptimizeEntry and optUseEMA ? ta.ema(close, l4) : na
+
+float ma_w0 = optOptimizeEntry and optUseWMA ? ta.wma(close, l0) : na
+float ma_w1 = optOptimizeEntry and optUseWMA ? ta.wma(close, l1) : na
+float ma_w2 = optOptimizeEntry and optUseWMA ? ta.wma(close, l2) : na
+float ma_w3 = optOptimizeEntry and optUseWMA ? ta.wma(close, l3) : na
+float ma_w4 = optOptimizeEntry and optUseWMA ? ta.wma(close, l4) : na
+
+float ma_h0 = optOptimizeEntry and optUseHMA ? ta.hma(close, l0) : na
+float ma_h1 = optOptimizeEntry and optUseHMA ? ta.hma(close, l1) : na
+float ma_h2 = optOptimizeEntry and optUseHMA ? ta.hma(close, l2) : na
+float ma_h3 = optOptimizeEntry and optUseHMA ? ta.hma(close, l3) : na
+float ma_h4 = optOptimizeEntry and optUseHMA ? ta.hma(close, l4) : na
+
+float ma_v0 = optOptimizeEntry and optUseVWAP ? ta.vwma(hlc3, l0) : na
+float ma_v1 = optOptimizeEntry and optUseVWAP ? ta.vwma(hlc3, l1) : na
+float ma_v2 = optOptimizeEntry and optUseVWAP ? ta.vwma(hlc3, l2) : na
+float ma_v3 = optOptimizeEntry and optUseVWAP ? ta.vwma(hlc3, l3) : na
+float ma_v4 = optOptimizeEntry and optUseVWAP ? ta.vwma(hlc3, l4) : na
+
+cus_ma_val = getMA(slMaType, slMaLen)
+atr14_val = ta.atr(14)
+opt_lvn_bull = optOptimizeSL and optUseSLLvn ? f_rolling_lvn(rollPocLen, rowsInput, open, true) : na
+opt_lvn_bear = optOptimizeSL and optUseSLLvn ? f_rolling_lvn(rollPocLen, rowsInput, open, false) : na
+opt_mpoc = optOptimizeSL and optUseSLMPoc ? f_rolling_poc(rollPocLen, rowsInput) : na
+low5_val = ta.lowest(low, 5)
+low10_val = ta.lowest(low, 10)
+low15_val = ta.lowest(low, 15)
+high5_val = ta.highest(high, 5)
+high10_val = ta.highest(high, 10)
+high15_val = ta.highest(high, 15)
+
+
+
+
+// =============================================================================
+// STRATEGY EXECUTION & DYNAMIC SL/TP
+// =============================================================================
+
+rollingPoc = showRollPOC ? f_rolling_poc(rollPocLen, rowsInput) : na
+var float rollingPocMA = na
+
+if showRollPOC and showRollMA
+    if maType == "EMA"
+        rollingPocMA := ta.ema(rollingPoc, maLength)
+    else if maType == "WMA"
+        rollingPocMA := ta.wma(rollingPoc, maLength)
+    else
+        rollingPocMA := ta.sma(rollingPoc, maLength)
+
+plot(rollingPoc, "Rolling POC", color=rollPocCol, linewidth=1, style=plot.style_line)
+plot(rollingPocMA, "Rolling POC MA", color=rollMaCol, linewidth=2)
+
+customMAVal = getMA(slMaType, slMaLen)
+atrVal = ta.atr(atrLen)
+lookbackLow = ta.lowest(low, lbLen)
+lookbackHigh = ta.highest(high, lbLen)
+
+var bool sim_active = false
+var int sim_dir = 0
+var float sim_sl = na
+var float sim_tp = na
+var float sim_entry = na
+var int sim_entry_bar = na
+var float[] trade_profits = array.new_float()
+
+float globalMinRiskDist = math.max(open * 0.001, math.max(syminfo.mintick * 10, atrVal[1] * minSLDist))
+
+// Entry conditions checking (only when flat, executes at the OPEN of the next bar)
+if not sim_active and buySignal[1]
+    float calculatedSL = na
+    if slType == "Signal MA"
+        calculatedSL := signalMA[1]
+    else if slType == "Custom MA"
+        calculatedSL := customMAVal[1]
+    else if slType == "ATR"
+        calculatedSL := open - (atrVal[1] * atrMult)
+    else if slType == "Candle Lookback"
+        calculatedSL := lookbackLow[1] * (1 - (lbMargin / 100))
+    else if slType == "Volume Profile LVN"
+        calculatedSL := f_rolling_lvn(rollPocLen, rowsInput, open, true)
+    else if slType == "Moving POC"
+        calculatedSL := rollingPoc[1]
+        
+    if na(calculatedSL)
+        calculatedSL := open - atrVal[1]
+        
+    calculatedSL := math.min(calculatedSL, open - globalMinRiskDist)
+    
+    sim_active := true
+    sim_dir := 1
+    sim_entry := open
+    sim_entry_bar := bar_index
+    sim_sl := calculatedSL
+    float risk = open - calculatedSL
+    sim_tp := open + (risk * targetRR)
+
+if not sim_active and sellSignal[1]
+    float calculatedSL = na
+    if slType == "Signal MA"
+        calculatedSL := signalMA[1]
+    else if slType == "Custom MA"
+        calculatedSL := customMAVal[1]
+    else if slType == "ATR"
+        calculatedSL := open + (atrVal[1] * atrMult)
+    else if slType == "Candle Lookback"
+        calculatedSL := lookbackHigh[1] * (1 + (lbMargin / 100))
+    else if slType == "Volume Profile LVN"
+        calculatedSL := f_rolling_lvn(rollPocLen, rowsInput, open, false)
+    else if slType == "Moving POC"
+        calculatedSL := rollingPoc[1]
+        
+    if na(calculatedSL)
+        calculatedSL := open + atrVal[1]
+        
+    calculatedSL := math.max(calculatedSL, open + globalMinRiskDist)
+        
+    sim_active := true
+    sim_dir := -1
+    sim_entry := open
+    sim_entry_bar := bar_index
+    sim_sl := calculatedSL
+    float risk = calculatedSL - open
+    sim_tp := open - (risk * targetRR)
+
+// Exit checking (checked on every bar when active, starting from the bar after entry)
+if sim_active and bar_index > sim_entry_bar
+    bool closed = false
+    float pnl = 0.0
+    
+    if sim_dir == 1
+        if low <= sim_sl
+            closed := true
+            pnl := -fixedRisk
+        else if high >= sim_tp
+            closed := true
+            pnl := fixedRisk * targetRR
+    else if sim_dir == -1
+        if high >= sim_sl
+            closed := true
+            pnl := -fixedRisk
+        else if low <= sim_tp
+            closed := true
+            pnl := fixedRisk * targetRR
+            
+    if closed
+        array.push(trade_profits, pnl)
+        sim_active := false
+        sim_dir := 0
+        sim_entry := na
+        sim_entry_bar := na
+        sim_sl := na
+        sim_tp := na
+
+bool show_lines = not autoOptimize and sim_active
+plot(autoOptimize ? (opt_active ? opt_active_sl : na) : (show_lines ? sim_sl : na), title="Stop Loss", style=plot.style_linebr, color=color.new(color.red, 0), linewidth=2)
+plot(autoOptimize ? (opt_active ? opt_active_tp : na) : (show_lines ? sim_tp : na), title="Take Profit", style=plot.style_linebr, color=color.new(color.green, 0), linewidth=2)
+
+// =============================================================================
+// AUTO OPTIMIZATION ENGINE (Runs on last bar only)
+// =============================================================================
+var line[] optLines = array.new_line()
+var label[] optLabels = array.new_label()
+var box[] optBoxes = array.new_box()
+
+bool run_sweep = (barstate.islastconfirmedhistory or (barstate.islast and barstate.isconfirmed)) and autoOptimize
+bool run_drawings = (barstate.islastconfirmedhistory or barstate.islast) and autoOptimize
+
+if run_drawings
+    // Clear normal trade profits
+    array.clear(trade_profits)
+    
+    // Clear previous drawings
+    if array.size(optLines) > 0
+        for l in optLines
+            line.delete(l)
+        array.clear(optLines)
+    if array.size(optLabels) > 0
+        for lb in optLabels
+            label.delete(lb)
+        array.clear(optLabels)
+    if array.size(optBoxes) > 0
+        for b in optBoxes
+            box.delete(b)
+        array.clear(optBoxes)
+        
+    float max_metric = -99999999.0
+    if run_sweep
+        max_metric := -99999999.0 // Reassigned
+        best_t_idx := 0
+        best_l_idx := 0
+        best_s_idx := 0
+        best_r_val := 2.0
+
+        // Safe lookback window
+        max_lookback := math.min(bar_index, optLookback)
+
+        // Setup valid MA Types
+        int[] valid_ma_types = array.new_int()
+        if optOptimizeEntry
+            if optUseSMA
+                array.push(valid_ma_types, 0)
+            if optUseEMA
+                array.push(valid_ma_types, 1)
+            if optUseWMA
+                array.push(valid_ma_types, 2)
+            if optUseHMA
+                array.push(valid_ma_types, 3)
+            if optUseVWAP
+                array.push(valid_ma_types, 4)
+        else
+            int base_t = maTypeSignal == "SMA" ? 0 : maTypeSignal == "EMA" ? 1 : maTypeSignal == "WMA" ? 2 : maTypeSignal == "HMA" ? 3 : 4
+            array.push(valid_ma_types, base_t)
+            
+        // Setup valid MA Lens
+        int[] valid_ma_lens = array.new_int()
+        if optOptimizeEntry
+            array.push(valid_ma_lens, 0) // l0
+            if optMaMin + optMaStep <= optMaMax
+                array.push(valid_ma_lens, 1) // l1
+            if optMaMin + 2*optMaStep <= optMaMax
+                array.push(valid_ma_lens, 2) // l2
+            if optMaMin + 3*optMaStep <= optMaMax
+                array.push(valid_ma_lens, 3) // l3
+            if optMaMin + 4*optMaStep <= optMaMax
+                array.push(valid_ma_lens, 4) // l4
+        else
+            array.push(valid_ma_lens, 0) // We will override the value calculation directly
+
+        // Setup valid SL Modes
+        int[] valid_sl_modes = array.new_int()
+        int base_s_idx = slType == "Signal MA" ? 0 : slType == "Custom MA" ? 7 : slType == "ATR" ? (atrMult <= 1.0 ? 1 : atrMult <= 1.5 ? 2 : 3) : slType == "Candle Lookback" ? (lbLen <= 5 ? 4 : lbLen <= 10 ? 5 : 6) : slType == "Volume Profile LVN" ? 8 : 9
+        if optOptimizeSL
+            if optUseSLSig
+                array.push(valid_sl_modes, 0)
+            if optUseSLAtr
+                array.push(valid_sl_modes, 1)
+                array.push(valid_sl_modes, 2)
+                array.push(valid_sl_modes, 3)
+            if optUseSLLb
+                array.push(valid_sl_modes, 4)
+                array.push(valid_sl_modes, 5)
+                array.push(valid_sl_modes, 6)
+            if optUseSLCus
+                array.push(valid_sl_modes, 7)
+            if optUseSLLvn
+                array.push(valid_sl_modes, 8)
+            if optUseSLMPoc
+                array.push(valid_sl_modes, 9)
+        else
+            array.push(valid_sl_modes, base_s_idx)
+            
+        int num_ma_types = array.size(valid_ma_types)
+        int num_ma_lens = array.size(valid_ma_lens)
+        int num_sl_modes = array.size(valid_sl_modes)
+
+        if optMethod == "Two-Stage (Fast)"
+            // --- STAGE 1: Optimize Entry MA Settings ---
+            float base_rr = targetRR
+            float stage1_max_metric = -99999999.0
+
+            if optOptimizeEntry and num_ma_types > 0 and num_ma_lens > 0
+                for t_idx = 0 to num_ma_types - 1
+                    int ma_type_idx = array.get(valid_ma_types, t_idx)
+                    for l_idx = 0 to num_ma_lens - 1
+                        int ma_len_idx = array.get(valid_ma_lens, l_idx)
+                        bool o_sim_active = false
+                        int o_sim_dir = 0
+                        float o_sim_sl = na
+                        float o_sim_tp = na
+                        int o_entry_ago = 0
+
+                        int total_trades = 0
+                        int wins = 0
+                        float net_pnl = 0.0
+                        float gross_wins = 0.0
+                        float gross_losses = 0.0
+
+                        // Chronological simulation over the lookback window using series history referencing
+                        for loop_idx = 1 to max_lookback - 1
+                            int ago = max_lookback - loop_idx
+                            float c_val = close[ago]
+                            float o_val = open[ago]
+                            float h_val = high[ago]
+                            float l_val = low[ago]
+
+                            float ma_val = na
+                            float ma_prev = na
+
+                            if not optOptimizeEntry
+                                ma_val := signalMA[ago]
+                                ma_prev := signalMA[ago + 1]
+                            else if ma_type_idx == 0
+                                ma_val := ma_len_idx == 0 ? ma_s0[ago] : ma_len_idx == 1 ? ma_s1[ago] : ma_len_idx == 2 ? ma_s2[ago] : ma_len_idx == 3 ? ma_s3[ago] : ma_s4[ago]
+                                ma_prev := ma_len_idx == 0 ? ma_s0[ago+1] : ma_len_idx == 1 ? ma_s1[ago+1] : ma_len_idx == 2 ? ma_s2[ago+1] : ma_len_idx == 3 ? ma_s3[ago+1] : ma_s4[ago+1]
+                            else if ma_type_idx == 1
+                                ma_val := ma_len_idx == 0 ? ma_e0[ago] : ma_len_idx == 1 ? ma_e1[ago] : ma_len_idx == 2 ? ma_e2[ago] : ma_len_idx == 3 ? ma_e3[ago] : ma_e4[ago]
+                                ma_prev := ma_len_idx == 0 ? ma_e0[ago+1] : ma_len_idx == 1 ? ma_e1[ago+1] : ma_len_idx == 2 ? ma_e2[ago+1] : ma_len_idx == 3 ? ma_e3[ago+1] : ma_e4[ago+1]
+                            else if ma_type_idx == 2
+                                ma_val := ma_len_idx == 0 ? ma_w0[ago] : ma_len_idx == 1 ? ma_w1[ago] : ma_len_idx == 2 ? ma_w2[ago] : ma_len_idx == 3 ? ma_w3[ago] : ma_w4[ago]
+                                ma_prev := ma_len_idx == 0 ? ma_w0[ago+1] : ma_len_idx == 1 ? ma_w1[ago+1] : ma_len_idx == 2 ? ma_w2[ago+1] : ma_len_idx == 3 ? ma_w3[ago+1] : ma_w4[ago+1]
+                            else if ma_type_idx == 3
+                                ma_val := ma_len_idx == 0 ? ma_h0[ago] : ma_len_idx == 1 ? ma_h1[ago] : ma_len_idx == 2 ? ma_h2[ago] : ma_len_idx == 3 ? ma_h3[ago] : ma_h4[ago]
+                                ma_prev := ma_len_idx == 0 ? ma_h0[ago+1] : ma_len_idx == 1 ? ma_h1[ago+1] : ma_len_idx == 2 ? ma_h2[ago+1] : ma_len_idx == 3 ? ma_h3[ago+1] : ma_h4[ago+1]
+                            else
+                                ma_val := ma_len_idx == 0 ? ma_v0[ago] : ma_len_idx == 1 ? ma_v1[ago] : ma_len_idx == 2 ? ma_v2[ago] : ma_len_idx == 3 ? ma_v3[ago] : ma_v4[ago]
+                                ma_prev := ma_len_idx == 0 ? ma_v0[ago+1] : ma_len_idx == 1 ? ma_v1[ago+1] : ma_len_idx == 2 ? ma_v2[ago+1] : ma_len_idx == 3 ? ma_v3[ago+1] : ma_v4[ago+1]
+
+                            float vwap_val = slowMA[ago]
+                            bool is_bull = isWicklessBullish[ago]
+                            bool is_bear = isWicklessBearish[ago]
+
+                            bool sig_buy = (ma_val > vwap_val) and is_bull and (ma_val > ma_prev) and (c_val > ma_val)
+                            bool sig_sell = (ma_val < vwap_val) and is_bear and (ma_val < ma_prev) and (c_val < ma_val)
+
+                            if not o_sim_active and ago > 1
+                                float o_val_next = open[ago - 1]
+                                if sig_buy
+                                    float sl = na
+                                    if base_s_idx == 0
+                                        sl := ma_val
+                                    else if base_s_idx == 1
+                                        sl := o_val_next - atr14_val[ago] * 1.0
+                                    else if base_s_idx == 2
+                                        sl := o_val_next - atr14_val[ago] * 1.5
+                                    else if base_s_idx == 3
+                                        sl := o_val_next - atr14_val[ago] * 2.0
+                                    else if base_s_idx == 4
+                                        sl := low5_val[ago] * (1 - (lbMargin / 100))
+                                    else if base_s_idx == 5
+                                        sl := low10_val[ago] * (1 - (lbMargin / 100))
+                                    else if base_s_idx == 6
+                                        sl := low15_val[ago] * (1 - (lbMargin / 100))
+
+                                    float minRiskDist = math.max(o_val_next * 0.001, math.max(syminfo.mintick * 10, atr14_val[ago] * minSLDist))
+                                    sl := math.min(sl, o_val_next - minRiskDist)
+
+                                    o_sim_active := true
+                                    o_sim_dir := 1
+                                    o_sim_sl := sl
+                                    o_sim_tp := o_val_next + (o_val_next - sl) * base_rr
+                                    o_entry_ago := ago - 1
+                                else if sig_sell
+                                    float sl = na
+                                    if base_s_idx == 0
+                                        sl := ma_val
+                                    else if base_s_idx == 1
+                                        sl := o_val_next + atr14_val[ago] * 1.0
+                                    else if base_s_idx == 2
+                                        sl := o_val_next + atr14_val[ago] * 1.5
+                                    else if base_s_idx == 3
+                                        sl := o_val_next + atr14_val[ago] * 2.0
+                                    else if base_s_idx == 4
+                                        sl := high5_val[ago] * (1 + (lbMargin / 100))
+                                    else if base_s_idx == 5
+                                        sl := high10_val[ago] * (1 + (lbMargin / 100))
+                                    else if base_s_idx == 6
+                                        sl := high15_val[ago] * (1 + (lbMargin / 100))
+
+                                    float minRiskDist = math.max(o_val_next * 0.001, math.max(syminfo.mintick * 10, atr14_val[ago] * minSLDist))
+                                    sl := math.max(sl, o_val_next + minRiskDist)
+
+                                    o_sim_active := true
+                                    o_sim_dir := -1
+                                    o_sim_sl := sl
+                                    o_sim_tp := o_val_next - (sl - o_val_next) * base_rr
+                                    o_entry_ago := ago - 1
+                            else if o_sim_active and ago < o_entry_ago
+                                bool closed = false
+                                float pnl = 0.0
+                                if o_sim_dir == 1
+                                    if l_val <= o_sim_sl
+                                        closed := true
+                                        pnl := -fixedRisk
+                                    else if h_val >= o_sim_tp
+                                        closed := true
+                                        pnl := fixedRisk * base_rr
+                                else
+                                    if h_val >= o_sim_sl
+                                        closed := true
+                                        pnl := -fixedRisk
+                                    else if l_val <= o_sim_tp
+                                        closed := true
+                                        pnl := fixedRisk * base_rr
+
+                                if closed
+                                    total_trades += 1
+                                    net_pnl += pnl
+                                    if pnl > 0
+                                        wins += 1
+                                        gross_wins += pnl
+                                    else
+                                        gross_losses += math.abs(pnl)
+                                    o_sim_active := false
+                                    o_sim_dir := 0
+                                    o_sim_sl := na
+                                    o_sim_tp := na
+
+                        float metric_val = 0.0
+                        if optMetric == "Net P&L"
+                            metric_val := net_pnl
+                        else if optMetric == "Win Rate"
+                            metric_val := total_trades > 0 ? (wins * 100.0 / total_trades) : 0.0
+                        else if optMetric == "Profit Factor"
+                            metric_val := gross_losses == 0 ? (gross_wins > 0 ? 999.0 : 0.0) : (gross_wins / gross_losses)
+                        else if optMetric == "Expectancy"
+                            metric_val := total_trades > 0 ? (net_pnl / total_trades) : 0.0
+
+                        if metric_val > stage1_max_metric or (metric_val == stage1_max_metric and total_trades > 0)
+                            stage1_max_metric := metric_val
+                            best_t_idx := ma_type_idx
+                            best_l_idx := ma_len_idx
+            else
+                best_t_idx := array.get(valid_ma_types, 0)
+                best_l_idx := array.get(valid_ma_lens, 0)
+
+            // --- STAGE 2: Optimize Exit Settings ---
+            if optOptimizeSL and num_sl_modes > 0
+                for s_idx = 0 to num_sl_modes - 1
+                    int sl_mode_idx = array.get(valid_sl_modes, s_idx)
+                    for rr_idx = 0 to rrSteps - 1
+                        float current_rr = optMinRR + rr_idx * optRRStep
+
+                        bool o_sim_active = false
+                        int o_entry_ago = 0
+                        int o_sim_dir = 0
+                        float o_sim_sl = na
+                        float o_sim_tp = na
+
+                        int total_trades = 0
+                        int wins = 0
+                        float net_pnl = 0.0
+                        float gross_wins = 0.0
+                        float gross_losses = 0.0
+
+                        for loop_idx = 1 to max_lookback - 1
+                            int ago = max_lookback - loop_idx
+                            float c_val = close[ago]
+                            float o_val = open[ago]
+                            float h_val = high[ago]
+                            float l_val = low[ago]
+
+                            float ma_val = na
+                            float ma_prev = na
+
+                            if not optOptimizeEntry
+                                ma_val := signalMA[ago]
+                                ma_prev := signalMA[ago + 1]
+                            else if best_t_idx == 0
+                                ma_val := best_l_idx == 0 ? ma_s0[ago] : best_l_idx == 1 ? ma_s1[ago] : best_l_idx == 2 ? ma_s2[ago] : best_l_idx == 3 ? ma_s3[ago] : ma_s4[ago]
+                                ma_prev := best_l_idx == 0 ? ma_s0[ago+1] : best_l_idx == 1 ? ma_s1[ago+1] : best_l_idx == 2 ? ma_s2[ago+1] : best_l_idx == 3 ? ma_s3[ago+1] : ma_s4[ago+1]
+                            else if best_t_idx == 1
+                                ma_val := best_l_idx == 0 ? ma_e0[ago] : best_l_idx == 1 ? ma_e1[ago] : best_l_idx == 2 ? ma_e2[ago] : best_l_idx == 3 ? ma_e3[ago] : ma_e4[ago]
+                                ma_prev := best_l_idx == 0 ? ma_e0[ago+1] : best_l_idx == 1 ? ma_e1[ago+1] : best_l_idx == 2 ? ma_e2[ago+1] : best_l_idx == 3 ? ma_e3[ago+1] : ma_e4[ago+1]
+                            else if best_t_idx == 2
+                                ma_val := best_l_idx == 0 ? ma_w0[ago] : best_l_idx == 1 ? ma_w1[ago] : best_l_idx == 2 ? ma_w2[ago] : best_l_idx == 3 ? ma_w3[ago] : ma_w4[ago]
+                                ma_prev := best_l_idx == 0 ? ma_w0[ago+1] : best_l_idx == 1 ? ma_w1[ago+1] : best_l_idx == 2 ? ma_w2[ago+1] : best_l_idx == 3 ? ma_w3[ago+1] : ma_w4[ago+1]
+                            else if best_t_idx == 3
+                                ma_val := best_l_idx == 0 ? ma_h0[ago] : best_l_idx == 1 ? ma_h1[ago] : best_l_idx == 2 ? ma_h2[ago] : best_l_idx == 3 ? ma_h3[ago] : ma_h4[ago]
+                                ma_prev := best_l_idx == 0 ? ma_h0[ago+1] : best_l_idx == 1 ? ma_h1[ago+1] : best_l_idx == 2 ? ma_h2[ago+1] : best_l_idx == 3 ? ma_h3[ago+1] : ma_h4[ago+1]
+                            else
+                                ma_val := best_l_idx == 0 ? ma_v0[ago] : best_l_idx == 1 ? ma_v1[ago] : best_l_idx == 2 ? ma_v2[ago] : best_l_idx == 3 ? ma_v3[ago] : ma_v4[ago]
+                                ma_prev := best_l_idx == 0 ? ma_v0[ago+1] : best_l_idx == 1 ? ma_v1[ago+1] : best_l_idx == 2 ? ma_v2[ago+1] : best_l_idx == 3 ? ma_v3[ago+1] : ma_v4[ago+1]
+
+                            float vwap_val = slowMA[ago]
+                            bool is_bull = isWicklessBullish[ago]
+                            bool is_bear = isWicklessBearish[ago]
+
+                            bool sig_buy = (ma_val > vwap_val) and is_bull and (ma_val > ma_prev) and (c_val > ma_val)
+                            bool sig_sell = (ma_val < vwap_val) and is_bear and (ma_val < ma_prev) and (c_val < ma_val)
+
+                            if not o_sim_active and ago > 1
+                                float o_val_next = open[ago - 1]
+                                if sig_buy
+                                    float sl = na
+                                    if sl_mode_idx == 0
+                                        sl := ma_val
+                                    else if sl_mode_idx == 7
+                                        sl := cus_ma_val[ago]
+                                    else if sl_mode_idx == 1
+                                        sl := o_val_next - atr14_val[ago] * 1.0
+                                    else if sl_mode_idx == 2
+                                        sl := o_val_next - atr14_val[ago] * 1.5
+                                    else if sl_mode_idx == 3
+                                        sl := o_val_next - atr14_val[ago] * 2.0
+                                    else if sl_mode_idx == 4
+                                        sl := low5_val[ago] * (1 - (lbMargin / 100))
+                                    else if sl_mode_idx == 5
+                                        sl := low10_val[ago] * (1 - (lbMargin / 100))
+                                    else if sl_mode_idx == 6
+                                        sl := low15_val[ago] * (1 - (lbMargin / 100))
+                                    else if sl_mode_idx == 8
+                                        sl := opt_lvn_bull[ago]
+                                    else if sl_mode_idx == 9
+                                        sl := opt_mpoc[ago]
+
+                                    float minRiskDist = math.max(o_val_next * 0.001, math.max(syminfo.mintick * 10, atr14_val[ago] * minSLDist))
+                                    sl := math.min(sl, o_val_next - minRiskDist)
+
+                                    o_sim_active := true
+                                    o_sim_dir := 1
+                                    o_sim_sl := sl
+                                    o_sim_tp := o_val_next + (o_val_next - sl) * current_rr
+                                    o_entry_ago := ago - 1
+                                else if sig_sell
+                                    float sl = na
+                                    if sl_mode_idx == 0
+                                        sl := ma_val
+                                    else if sl_mode_idx == 7
+                                        sl := cus_ma_val[ago]
+                                    else if sl_mode_idx == 1
+                                        sl := o_val_next + atr14_val[ago] * 1.0
+                                    else if sl_mode_idx == 2
+                                        sl := o_val_next + atr14_val[ago] * 1.5
+                                    else if sl_mode_idx == 3
+                                        sl := o_val_next + atr14_val[ago] * 2.0
+                                    else if sl_mode_idx == 4
+                                        sl := high5_val[ago] * (1 + (lbMargin / 100))
+                                    else if sl_mode_idx == 5
+                                        sl := high10_val[ago] * (1 + (lbMargin / 100))
+                                    else if sl_mode_idx == 6
+                                        sl := high15_val[ago] * (1 + (lbMargin / 100))
+                                    else if sl_mode_idx == 8
+                                        sl := opt_lvn_bear[ago]
+                                    else if sl_mode_idx == 9
+                                        sl := opt_mpoc[ago]
+
+                                    float minRiskDist = math.max(o_val_next * 0.001, math.max(syminfo.mintick * 10, atr14_val[ago] * minSLDist))
+                                    sl := math.max(sl, o_val_next + minRiskDist)
+
+                                    o_sim_active := true
+                                    o_sim_dir := -1
+                                    o_sim_sl := sl
+                                    o_sim_tp := o_val_next - (sl - o_val_next) * current_rr
+                                    o_entry_ago := ago - 1
+                            else if o_sim_active and ago < o_entry_ago
+                                bool closed = false
+                                float pnl = 0.0
+                                if o_sim_dir == 1
+                                    if l_val <= o_sim_sl
+                                        closed := true
+                                        pnl := -fixedRisk
+                                    else if h_val >= o_sim_tp
+                                        closed := true
+                                        pnl := fixedRisk * current_rr
+                                else
+                                    if h_val >= o_sim_sl
+                                        closed := true
+                                        pnl := -fixedRisk
+                                    else if l_val <= o_sim_tp
+                                        closed := true
+                                        pnl := fixedRisk * current_rr
+
+                                if closed
+                                    total_trades += 1
+                                    net_pnl += pnl
+                                    if pnl > 0
+                                        wins += 1
+                                        gross_wins += pnl
+                                    else
+                                        gross_losses += math.abs(pnl)
+                                    o_sim_active := false
+                                    o_sim_dir := 0
+                                    o_sim_sl := na
+                                    o_sim_tp := na
+
+                        float metric_val = 0.0
+                        if optMetric == "Net P&L"
+                            metric_val := net_pnl
+                        else if optMetric == "Win Rate"
+                            metric_val := total_trades > 0 ? (wins * 100.0 / total_trades) : 0.0
+                        else if optMetric == "Profit Factor"
+                            metric_val := gross_losses == 0 ? (gross_wins > 0 ? 999.0 : 0.0) : (gross_wins / gross_losses)
+                        else if optMetric == "Expectancy"
+                            metric_val := total_trades > 0 ? (net_pnl / total_trades) : 0.0
+
+                        if metric_val > max_metric or (metric_val == max_metric and total_trades > 0)
+                            max_metric := metric_val
+                            best_s_idx := sl_mode_idx
+                            best_r_val := current_rr
+            else
+                best_s_idx := array.get(valid_sl_modes, 0)
+                best_r_val := targetRR
+                    
+        else if optMethod == "Brute Force (Slow)"
+            // --- BRUTE FORCE: Flat-loop independent sequential simulation ---
+            // Single outer loop over combo index, decoded to (MA type, MA length, SL mode, RR).
+            // Each combo runs its own full independent backtest.
+            int bf_total = num_ma_types * num_ma_lens * num_sl_modes * rrSteps
+            debug_bf_total := bf_total
+            debug_bf_evaluated := 0
+
+            for combo_idx = 0 to bf_total - 1
+                // Decode flat index into parameter indices
+                int rr_idx = combo_idx % rrSteps
+                int rem1 = int((combo_idx - rr_idx) / rrSteps + 0.00001)
+                
+                int sl_mode_arr_idx = rem1 % num_sl_modes
+                int sl_mode_idx = array.get(valid_sl_modes, sl_mode_arr_idx)
+                
+                int rem2 = int((rem1 - sl_mode_arr_idx) / num_sl_modes + 0.00001)
+                
+                int ma_len_arr_idx = rem2 % num_ma_lens
+                int ma_len_idx = array.get(valid_ma_lens, ma_len_arr_idx)
+                
+                int ma_type_arr_idx = int((rem2 - ma_len_arr_idx) / num_ma_lens + 0.00001)
+                int ma_type_idx = array.get(valid_ma_types, ma_type_arr_idx)
+
+                float current_rr = optMinRR + rr_idx * optRRStep
+
+                // Independent simulation state for this combo
+                bool o_sim_active = false
+                int o_entry_ago = 0
+                int o_sim_dir = 0
+                float o_sim_sl = na
+                float o_sim_tp = na
+
+                int total_trades = 0
+                int wins = 0
+                float net_pnl = 0.0
+                float gross_wins = 0.0
+                float gross_losses = 0.0
+
+                for loop_idx = 1 to max_lookback - 1
+                    int ago = max_lookback - loop_idx
+                    float c_val = close[ago]
+                    float o_val = open[ago]
+                    float h_val = high[ago]
+                    float l_val = low[ago]
+
+                    float ma_val = na
+                    float ma_prev = na
+
+                    if not optOptimizeEntry
+                        ma_val := signalMA[ago]
+                        ma_prev := signalMA[ago + 1]
+                    else
+                        if ma_type_idx == 0
+                            ma_val := ma_len_idx == 0 ? ma_s0[ago] : ma_len_idx == 1 ? ma_s1[ago] : ma_len_idx == 2 ? ma_s2[ago] : ma_len_idx == 3 ? ma_s3[ago] : ma_s4[ago]
+                            ma_prev := ma_len_idx == 0 ? ma_s0[ago+1] : ma_len_idx == 1 ? ma_s1[ago+1] : ma_len_idx == 2 ? ma_s2[ago+1] : ma_len_idx == 3 ? ma_s3[ago+1] : ma_s4[ago+1]
+                        else if ma_type_idx == 1
+                            ma_val := ma_len_idx == 0 ? ma_e0[ago] : ma_len_idx == 1 ? ma_e1[ago] : ma_len_idx == 2 ? ma_e2[ago] : ma_len_idx == 3 ? ma_e3[ago] : ma_e4[ago]
+                            ma_prev := ma_len_idx == 0 ? ma_e0[ago+1] : ma_len_idx == 1 ? ma_e1[ago+1] : ma_len_idx == 2 ? ma_e2[ago+1] : ma_len_idx == 3 ? ma_e3[ago+1] : ma_e4[ago+1]
+                        else if ma_type_idx == 2
+                            ma_val := ma_len_idx == 0 ? ma_w0[ago] : ma_len_idx == 1 ? ma_w1[ago] : ma_len_idx == 2 ? ma_w2[ago] : ma_len_idx == 3 ? ma_w3[ago] : ma_w4[ago]
+                            ma_prev := ma_len_idx == 0 ? ma_w0[ago+1] : ma_len_idx == 1 ? ma_w1[ago+1] : ma_len_idx == 2 ? ma_w2[ago+1] : ma_len_idx == 3 ? ma_w3[ago+1] : ma_w4[ago+1]
+                        else if ma_type_idx == 3
+                            ma_val := ma_len_idx == 0 ? ma_h0[ago] : ma_len_idx == 1 ? ma_h1[ago] : ma_len_idx == 2 ? ma_h2[ago] : ma_len_idx == 3 ? ma_h3[ago] : ma_h4[ago]
+                            ma_prev := ma_len_idx == 0 ? ma_h0[ago+1] : ma_len_idx == 1 ? ma_h1[ago+1] : ma_len_idx == 2 ? ma_h2[ago+1] : ma_len_idx == 3 ? ma_h3[ago+1] : ma_h4[ago+1]
+                        else
+                            ma_val := ma_len_idx == 0 ? ma_v0[ago] : ma_len_idx == 1 ? ma_v1[ago] : ma_len_idx == 2 ? ma_v2[ago] : ma_len_idx == 3 ? ma_v3[ago] : ma_v4[ago]
+                            ma_prev := ma_len_idx == 0 ? ma_v0[ago+1] : ma_len_idx == 1 ? ma_v1[ago+1] : ma_len_idx == 2 ? ma_v2[ago+1] : ma_len_idx == 3 ? ma_v3[ago+1] : ma_v4[ago+1]
+
+                        float vwap_val = slowMA[ago]
+                        bool is_bull = isWicklessBullish[ago]
+                        bool is_bear = isWicklessBearish[ago]
+
+                        bool sig_buy = (ma_val > vwap_val) and is_bull and (ma_val > ma_prev) and (c_val > ma_val)
+                        bool sig_sell = (ma_val < vwap_val) and is_bear and (ma_val < ma_prev) and (c_val < ma_val)
+
+                        if not o_sim_active and ago > 1
+                            float o_val_next = open[ago - 1]
+                            if sig_buy
+                                float sl = na
+                                if sl_mode_idx == 0
+                                    sl := ma_val
+                                else if sl_mode_idx == 7
+                                    sl := cus_ma_val[ago]
+                                else if sl_mode_idx == 1
+                                    sl := o_val_next - atr14_val[ago] * 1.0
+                                else if sl_mode_idx == 2
+                                    sl := o_val_next - atr14_val[ago] * 1.5
+                                else if sl_mode_idx == 3
+                                    sl := o_val_next - atr14_val[ago] * 2.0
+                                else if sl_mode_idx == 4
+                                    sl := low5_val[ago] * (1 - (lbMargin / 100))
+                                else if sl_mode_idx == 5
+                                    sl := low10_val[ago] * (1 - (lbMargin / 100))
+                                else if sl_mode_idx == 6
+                                    sl := low15_val[ago] * (1 - (lbMargin / 100))
+                                else if sl_mode_idx == 8
+                                    sl := opt_lvn_bull[ago]
+                                else if sl_mode_idx == 9
+                                    sl := opt_mpoc[ago]
+
+                                float minRiskDist = math.max(o_val_next * 0.001, math.max(syminfo.mintick * 10, atr14_val[ago] * minSLDist))
+                                sl := math.min(sl, o_val_next - minRiskDist)
+
+                                o_sim_active := true
+                                o_sim_dir := 1
+                                o_sim_sl := sl
+                                o_sim_tp := o_val_next + (o_val_next - sl) * current_rr
+                                o_entry_ago := ago - 1
+                            else if sig_sell
+                                float sl = na
+                                if sl_mode_idx == 0
+                                    sl := ma_val
+                                else if sl_mode_idx == 7
+                                    sl := cus_ma_val[ago]
+                                else if sl_mode_idx == 1
+                                    sl := o_val_next + atr14_val[ago] * 1.0
+                                else if sl_mode_idx == 2
+                                    sl := o_val_next + atr14_val[ago] * 1.5
+                                else if sl_mode_idx == 3
+                                    sl := o_val_next + atr14_val[ago] * 2.0
+                                else if sl_mode_idx == 4
+                                    sl := high5_val[ago] * (1 + (lbMargin / 100))
+                                else if sl_mode_idx == 5
+                                    sl := high10_val[ago] * (1 + (lbMargin / 100))
+                                else if sl_mode_idx == 6
+                                    sl := high15_val[ago] * (1 + (lbMargin / 100))
+                                else if sl_mode_idx == 8
+                                    sl := opt_lvn_bear[ago]
+                                else if sl_mode_idx == 9
+                                    sl := opt_mpoc[ago]
+
+                                float minRiskDist = math.max(o_val_next * 0.001, math.max(syminfo.mintick * 10, atr14_val[ago] * minSLDist))
+                                sl := math.max(sl, o_val_next + minRiskDist)
+
+                                o_sim_active := true
+                                o_sim_dir := -1
+                                o_sim_sl := sl
+                                o_sim_tp := o_val_next - (sl - o_val_next) * current_rr
+                                o_entry_ago := ago - 1
+                        else if o_sim_active and ago < o_entry_ago
+                            bool closed = false
+                            float pnl = 0.0
+                            if o_sim_dir == 1
+                                if l_val <= o_sim_sl
+                                    closed := true
+                                    pnl := -fixedRisk
+                                else if h_val >= o_sim_tp
+                                    closed := true
+                                    pnl := fixedRisk * current_rr
+                            else
+                                if h_val >= o_sim_sl
+                                    closed := true
+                                    pnl := -fixedRisk
+                                else if l_val <= o_sim_tp
+                                    closed := true
+                                    pnl := fixedRisk * current_rr
+
+                            if closed
+                                total_trades += 1
+                                net_pnl += pnl
+                                if pnl > 0
+                                    wins += 1
+                                    gross_wins += pnl
+                                else
+                                    gross_losses += math.abs(pnl)
+                                o_sim_active := false
+                                o_sim_dir := 0
+                                o_sim_sl := na
+                                o_sim_tp := na
+
+                debug_bf_evaluated += 1
+
+                // Evaluate this combo's metric
+                float metric_val = 0.0
+                if optMetric == "Net P&L"
+                    metric_val := net_pnl
+                else if optMetric == "Win Rate"
+                    metric_val := total_trades > 0 ? (wins * 100.0 / total_trades) : 0.0
+                else if optMetric == "Profit Factor"
+                    metric_val := gross_losses == 0 ? (gross_wins > 0 ? 999.0 : 0.0) : (gross_wins / gross_losses)
+                else if optMetric == "Expectancy"
+                    metric_val := total_trades > 0 ? (net_pnl / total_trades) : 0.0
+
+                if metric_val > max_metric or (metric_val == max_metric and total_trades > 0)
+                    max_metric := metric_val
+                    best_t_idx := ma_type_idx
+                    best_l_idx := ma_len_idx
+                    best_s_idx := sl_mode_idx
+                    best_r_val := current_rr
+
+            debug_opt_metric := max_metric
+
+        // Apply best results
+        best_ma_type := best_t_idx == 0 ? "SMA" : best_t_idx == 1 ? "EMA" : best_t_idx == 2 ? "WMA" : best_t_idx == 3 ? "HMA" : "VWAP"
+        best_ma_length := best_l_idx == 0 ? l0 : best_l_idx == 1 ? l1 : best_l_idx == 2 ? l2 : best_l_idx == 3 ? l3 : l4
+        best_sl_type := best_s_idx == 0 ? "Signal MA" : best_s_idx == 1 ? "ATR 1.0" : best_s_idx == 2 ? "ATR 1.5" : best_s_idx == 3 ? "ATR 2.0" : best_s_idx == 4 ? "Lookback 5" : best_s_idx == 5 ? "Lookback 10" : "Lookback 15"
+        best_rr := best_r_val
+        best_metric_val := max_metric
+
+    // --- RUN FINAL SIMULATION PASS USING BEST CONFIGURATION ---
+    bool f_active = false
+    int f_dir = 0
+    float f_sl = na
+    float f_tp = na
+    int f_entry_ago = 0
+    float f_entry_price = na
+    
+    for loop_idx = 1 to max_lookback - 1
+        int ago = max_lookback - loop_idx
+        float c_val = close[ago]
+        float o_val = open[ago]
+        float h_val = high[ago]
+        float l_val = low[ago]
+        
+        float ma_val = na
+        float ma_prev = na
+        
+        if not optOptimizeEntry
+            ma_val := signalMA[ago]
+            ma_prev := signalMA[ago + 1]
+        else
+            if best_t_idx == 0
+                ma_val := best_l_idx == 0 ? ma_s0[ago] : best_l_idx == 1 ? ma_s1[ago] : best_l_idx == 2 ? ma_s2[ago] : best_l_idx == 3 ? ma_s3[ago] : ma_s4[ago]
+                ma_prev := best_l_idx == 0 ? ma_s0[ago+1] : best_l_idx == 1 ? ma_s1[ago+1] : best_l_idx == 2 ? ma_s2[ago+1] : best_l_idx == 3 ? ma_s3[ago+1] : ma_s4[ago+1]
+            else if best_t_idx == 1
+                ma_val := best_l_idx == 0 ? ma_e0[ago] : best_l_idx == 1 ? ma_e1[ago] : best_l_idx == 2 ? ma_e2[ago] : best_l_idx == 3 ? ma_e3[ago] : ma_e4[ago]
+                ma_prev := best_l_idx == 0 ? ma_e0[ago+1] : best_l_idx == 1 ? ma_e1[ago+1] : best_l_idx == 2 ? ma_e2[ago+1] : best_l_idx == 3 ? ma_e3[ago+1] : ma_e4[ago+1]
+            else if best_t_idx == 2
+                ma_val := best_l_idx == 0 ? ma_w0[ago] : best_l_idx == 1 ? ma_w1[ago] : best_l_idx == 2 ? ma_w2[ago] : best_l_idx == 3 ? ma_w3[ago] : ma_w4[ago]
+                ma_prev := best_l_idx == 0 ? ma_w0[ago+1] : best_l_idx == 1 ? ma_w1[ago+1] : best_l_idx == 2 ? ma_w2[ago+1] : best_l_idx == 3 ? ma_w3[ago+1] : ma_w4[ago+1]
+            else if best_t_idx == 3
+                ma_val := best_l_idx == 0 ? ma_h0[ago] : best_l_idx == 1 ? ma_h1[ago] : best_l_idx == 2 ? ma_h2[ago] : best_l_idx == 3 ? ma_h3[ago] : ma_h4[ago]
+                ma_prev := best_l_idx == 0 ? ma_h0[ago+1] : best_l_idx == 1 ? ma_h1[ago+1] : best_l_idx == 2 ? ma_h2[ago+1] : best_l_idx == 3 ? ma_h3[ago+1] : ma_h4[ago+1]
+            else
+                ma_val := best_l_idx == 0 ? ma_v0[ago] : best_l_idx == 1 ? ma_v1[ago] : best_l_idx == 2 ? ma_v2[ago] : best_l_idx == 3 ? ma_v3[ago] : ma_v4[ago]
+                ma_prev := best_l_idx == 0 ? ma_v0[ago+1] : best_l_idx == 1 ? ma_v1[ago+1] : best_l_idx == 2 ? ma_v2[ago+1] : best_l_idx == 3 ? ma_v3[ago+1] : ma_v4[ago+1]
+                
+            float vwap_val = slowMA[ago]
+            bool is_bull = isWicklessBullish[ago]
+            bool is_bear = isWicklessBearish[ago]
+        
+            bool sig_buy = (ma_val > vwap_val) and is_bull and (ma_val > ma_prev) and (c_val > ma_val)
+            bool sig_sell = (ma_val < vwap_val) and is_bear and (ma_val < ma_prev) and (c_val < ma_val)
+        
+            if not f_active
+                if sig_buy and ago > 1
+                    float o_val_next = open[ago - 1]
+                    float sl = na
+                    if best_s_idx == 0
+                        sl := ma_val
+                    else if best_s_idx == 1
+                        sl := o_val_next - atr14_val[ago] * 1.0
+                    else if best_s_idx == 2
+                        sl := o_val_next - atr14_val[ago] * 1.5
+                    else if best_s_idx == 3
+                        sl := o_val_next - atr14_val[ago] * 2.0
+                    else if best_s_idx == 4
+                        sl := low5_val[ago] * (1 - (lbMargin / 100))
+                    else if best_s_idx == 5
+                        sl := low10_val[ago] * (1 - (lbMargin / 100))
+                    else if best_s_idx == 6
+                        sl := low15_val[ago] * (1 - (lbMargin / 100))
+                    
+                    float minRiskDist = math.max(o_val_next * 0.001, math.max(syminfo.mintick * 10, atr14_val[ago] * minSLDist))
+                    sl := math.min(sl, o_val_next - minRiskDist)
+                
+                    f_active := true
+                    f_dir := 1
+                    f_sl := sl
+                    f_tp := o_val_next + (o_val_next - sl) * best_r_val
+                    f_entry_ago := ago - 1
+                    f_entry_price := o_val_next
+                else if sig_sell and ago > 1
+                    float o_val_next = open[ago - 1]
+                    float sl = na
+                    if best_s_idx == 0
+                        sl := ma_val
+                    else if best_s_idx == 1
+                        sl := o_val_next + atr14_val[ago] * 1.0
+                    else if best_s_idx == 2
+                        sl := o_val_next + atr14_val[ago] * 1.5
+                    else if best_s_idx == 3
+                        sl := o_val_next + atr14_val[ago] * 2.0
+                    else if best_s_idx == 4
+                        sl := high5_val[ago] * (1 + (lbMargin / 100))
+                    else if best_s_idx == 5
+                        sl := high10_val[ago] * (1 + (lbMargin / 100))
+                    else if best_s_idx == 6
+                        sl := high15_val[ago] * (1 + (lbMargin / 100))
+                    
+                    float minRiskDist = math.max(o_val_next * 0.001, math.max(syminfo.mintick * 10, atr14_val[ago] * minSLDist))
+                    sl := math.max(sl, o_val_next + minRiskDist)
+                
+                    f_active := true
+                    f_dir := -1
+                    f_sl := sl
+                    f_tp := o_val_next - (sl - o_val_next) * best_r_val
+                    f_entry_ago := ago - 1
+                    f_entry_price := o_val_next
+            else if ago < f_entry_ago
+                bool closed = false
+                float pnl = 0.0
+                if f_dir == 1
+                    if l_val <= f_sl
+                        closed := true
+                        pnl := -fixedRisk
+                    else if h_val >= f_tp
+                        closed := true
+                        pnl := fixedRisk * best_r_val
+                else
+                    if h_val >= f_sl
+                        closed := true
+                        pnl := -fixedRisk
+                    else if l_val <= f_tp
+                        closed := true
+                        pnl := fixedRisk * best_r_val
+                    
+                if closed
+                    array.push(trade_profits, pnl)
+                
+                    int actual_entry_bar = bar_index - f_entry_ago
+                    int actual_exit_bar = bar_index - ago
+                
+                    // Name entry Buy/Sell
+                    string entry_text = f_dir == 1 ? "Buy" : "Sell"
+                    color entry_col = f_dir == 1 ? color.green : color.red
+                    label el = label.new(x=actual_entry_bar, y=na, text=entry_text,
+                               style=f_dir == 1 ? label.style_triangleup : label.style_triangledown,
+                               color=entry_col, textcolor=color.white,
+                               yloc=f_dir == 1 ? yloc.belowbar : yloc.abovebar, size=size.small)
+                    array.push(optLabels, el)
+                
+                    // Name exit SL/TP
+                    var string exit_yloc = na
+                    if f_dir == 1
+                        exit_yloc := pnl > 0 ? yloc.abovebar : yloc.belowbar
+                    else
+                        exit_yloc := pnl > 0 ? yloc.belowbar : yloc.abovebar
+                
+                    string exit_text = pnl > 0 ? "âœ“ TP" : ""
+                    color exit_col = pnl > 0 ? color.green : color.red
+                    label xl = label.new(x=actual_exit_bar, y=na, text=exit_text,
+                               style=pnl > 0 ? (f_dir == 1 ? label.style_label_down : label.style_label_up) : label.style_xcross,
+                               color=exit_col, textcolor=color.white,
+                               yloc=exit_yloc, size=size.small)
+                    array.push(optLabels, xl)
+                
+                    // Draw horizontal SL line (red)
+                    line sl_ln = line.new(x1=actual_entry_bar, y1=f_sl, x2=actual_exit_bar, y2=f_sl,
+                                 color=color.new(color.red, 40), style=line.style_solid, width=2)
+                    array.push(optLines, sl_ln)
+                
+                    // Draw horizontal TP line (green)
+                    line tp_ln = line.new(x1=actual_entry_bar, y1=f_tp, x2=actual_exit_bar, y2=f_tp,
+                                 color=color.new(color.green, 40), style=line.style_solid, width=2)
+                    array.push(optLines, tp_ln)
+                
+                    // Draw horizontal dotted Entry line (blue, thickness=2)
+                    line entry_ln = line.new(x1=actual_entry_bar, y1=f_entry_price, x2=actual_exit_bar, y2=f_entry_price,
+                                   color=color.new(color.blue, 30), style=line.style_dotted, width=2)
+                    array.push(optLines, entry_ln)
+                
+                    // Shade Entry-to-TP in green
+                    box tp_bx = box.new(left=actual_entry_bar, top=math.max(f_entry_price, f_tp), right=actual_exit_bar, bottom=math.min(f_entry_price, f_tp), bgcolor=color.new(color.green, 92), border_color=color.new(color.white, 100))
+                    array.push(optBoxes, tp_bx)
+                
+                    // Shade Entry-to-SL in red
+                    box sl_bx = box.new(left=actual_entry_bar, top=math.max(f_entry_price, f_sl), right=actual_exit_bar, bottom=math.min(f_entry_price, f_sl), bgcolor=color.new(color.red, 92), border_color=color.new(color.white, 100))
+                    array.push(optBoxes, sl_bx)
+                
+                    f_active := false
+                    f_dir := 0
+                    f_sl := na
+                    f_tp := na
+                    f_entry_price := na
+
+    // Store active trade info for plotting on the current bar
+    opt_active := f_active
+    opt_active_sl := f_sl
+    opt_active_tp := f_tp
+    
+    // Draw active optimized signal TP/SL lines dynamically on chart
+    if f_active
+        int actual_entry_bar = bar_index - f_entry_ago
+        color active_col = f_dir == 1 ? color.green : color.red
+        
+        string active_entry_text = f_dir == 1 ? "Buy" : "Sell"
+        label el = label.new(x=actual_entry_bar, y=na, text=active_entry_text,
+                   style=f_dir == 1 ? label.style_triangleup : label.style_triangledown,
+                   color=active_col, textcolor=color.white,
+                   yloc=f_dir == 1 ? yloc.belowbar : yloc.abovebar, size=size.small)
+        array.push(optLabels, el)
+        
+        // Active SL line (red) extending to current bar
+        line active_sl_ln = line.new(x1=actual_entry_bar, y1=f_sl, x2=bar_index, y2=f_sl,
+                             color=color.new(color.red, 20), style=line.style_solid, width=2)
+        array.push(optLines, active_sl_ln)
+        
+        // Active TP line (green) extending to current bar
+        line active_tp_ln = line.new(x1=actual_entry_bar, y1=f_tp, x2=bar_index, y2=f_tp,
+                             color=color.new(color.green, 20), style=line.style_solid, width=2)
+        array.push(optLines, active_tp_ln)
+        
+        // Active horizontal dotted Entry line (blue, thickness=2) extending to current bar
+        line active_entry_ln = line.new(x1=actual_entry_bar, y1=f_entry_price, x2=bar_index, y2=f_entry_price,
+                               color=color.new(color.blue, 30), style=line.style_dotted, width=2)
+        array.push(optLines, active_entry_ln)
+        
+        // Active Shade Entry-to-TP in green
+        box active_tp_bx = box.new(left=actual_entry_bar, top=math.max(f_entry_price, f_tp), right=bar_index, bottom=math.min(f_entry_price, f_tp), bgcolor=color.new(color.green, 92), border_color=color.new(color.white, 100))
+        array.push(optBoxes, active_tp_bx)
+        
+        // Active Shade Entry-to-SL in red
+        box active_sl_bx = box.new(left=actual_entry_bar, top=math.max(f_entry_price, f_sl), right=bar_index, bottom=math.min(f_entry_price, f_sl), bgcolor=color.new(color.red, 92), border_color=color.new(color.white, 100))
+        array.push(optBoxes, active_sl_bx)
+
+// =============================================================================
+// VOLUME PROFILE CALCULATIONS & DRAWINGS
+// =============================================================================
+
+var box[] profileBoxes = array.new_box()
+var line fixedPocLine = na
+
+if barstate.islastconfirmedhistory or barstate.islast
+    int startBarIndex = na
+    if periodType == "Fixed Range"
+        startBarIndex := math.max(0, bar_index - lookback + 1)
+    else
+        for i = 0 to math.min(bar_index, 5000)
+            if time[i] < chart.left_visible_bar_time
+                startBarIndex := bar_index - i + 1
+                break
+        if na(startBarIndex)
+            startBarIndex := 0
+
+    float hi = high
+    float lo = low
+    int totalBars = bar_index - startBarIndex + 1
+    for i = 1 to totalBars - 1
+        hi := math.max(hi, high[i])
+        lo := math.min(lo, low[i])
+        
+    float step_val = hi == lo ? 0.0001 : (hi - lo) / rowsInput
+
+    float[] binVolumes = array.new_float(rowsInput, 0.0)
+    float[] binUpVolumes = array.new_float(rowsInput, 0.0)
+    float[] binDownVolumes = array.new_float(rowsInput, 0.0)
+
+    for i = 0 to totalBars - 1
+        // Fallback to 1.0 if volume is 0 so it doesn't break on Forex/CFDs
+        float barVol = nz(volume[i]) == 0 ? 1.0 : nz(volume[i])
+        
+        float barHigh = high[i]
+        float barLow = low[i]
+        float barClose = close[i]
+        float barOpen = open[i]
+        bool isUp = barClose >= barOpen
+        
+        if barHigh == barLow
+            int binIdx = math.min(rowsInput - 1, math.max(0, math.floor((barClose - lo) / step_val)))
+            array.set(binVolumes, binIdx, array.get(binVolumes, binIdx) + barVol)
+            if isUp
+                array.set(binUpVolumes, binIdx, array.get(binUpVolumes, binIdx) + barVol)
+            else
+                array.set(binDownVolumes, binIdx, array.get(binDownVolumes, binIdx) + barVol)
+        else
+            for j = 0 to rowsInput - 1
+                float binMin = lo + j * step_val
+                float binMax = binMin + step_val
+                float overlapMin = math.max(barLow, binMin)
+                float overlapMax = math.min(barHigh, binMax)
+                
+                if overlapMax > overlapMin
+                    float proportion = (overlapMax - overlapMin) / (barHigh - barLow)
+                    float allocatedVol = barVol * proportion
+                    array.set(binVolumes, j, array.get(binVolumes, j) + allocatedVol)
+                    if isUp
+                        array.set(binUpVolumes, j, array.get(binUpVolumes, j) + allocatedVol)
+                    else
+                        array.set(binDownVolumes, j, array.get(binDownVolumes, j) + allocatedVol)
+
+    float maxVol = 0.0
+    int pocBinIdx = 0
+    for j = 0 to rowsInput - 1
+        float v = array.get(binVolumes, j)
+        if v > maxVol
+            maxVol := v
+            pocBinIdx := j
+
+    if maxVol == 0
+        maxVol := 1.0 // Prevent division by zero runtime error
+
+    float pocPrice = lo + pocBinIdx * step_val + (step_val / 2.0)
+    float hvnThresholdVal = maxVol * (hvnThresh / 100.0)
+
+    if array.size(profileBoxes) > 0
+        for b in profileBoxes
+            box.delete(b)
+        array.clear(profileBoxes)
+
+    int baseRight = bar_index + offsetInput
+    for j = 0 to rowsInput - 1
+        float v = array.get(binVolumes, j)
+        if v == 0
+            continue
+            
+        float upVol = array.get(binUpVolumes, j)
+        float downVol = array.get(binDownVolumes, j)
+        
+        int totalWidth = math.round(widthInput * (v / maxVol))
+        int upWidth = math.round(widthInput * (upVol / maxVol))
+        
+        float binBottom = lo + j * step_val
+        float binTop = binBottom + step_val
+        
+        bool isHVN = v >= hvnThresholdVal
+        
+        color currentUpColor = isHVN ? hvnUpColor : upColor
+        color currentDownColor = isHVN ? hvnDownColor : downColor
+        
+        int downLeft = baseRight - totalWidth
+        box downBox = box.new(
+             left=downLeft, top=binTop,
+             right=baseRight, bottom=binBottom,
+             bgcolor=currentDownColor, border_color=color.new(color.white, 100),
+             border_style=line.style_solid
+             )
+        array.push(profileBoxes, downBox)
+        
+        if upWidth > 0
+            int upLeft = baseRight - upWidth
+            box upBox = box.new(
+                 left=upLeft, top=binTop,
+                 right=baseRight, bottom=binBottom,
+                 bgcolor=currentUpColor, border_color=color.new(color.white, 100),
+                 border_style=line.style_solid
+                 )
+            array.push(profileBoxes, upBox)
+
+    if showFixedPOC
+        if not na(fixedPocLine)
+            line.delete(fixedPocLine)
+        fixedPocLine := line.new(
+             x1=startBarIndex, y1=pocPrice,
+             x2=baseRight, y2=pocPrice,
+             color=fixedPocCol, width=2, style=line.style_solid
+             )
+
+// =============================================================================
+// RESULTS DASHBOARD
+// =============================================================================
+var float first_bar_time = na
+if bar_index == 0
+    first_bar_time := time
+
+var table resTable = na
+if (barstate.islastconfirmedhistory or barstate.islast) and showDash
+    tablePos = dashLoc == "top_right" ? position.top_right :
+               dashLoc == "top_left" ? position.top_left :
+               dashLoc == "bottom_right" ? position.bottom_right :
+               position.bottom_left
+               
+    if na(resTable)
+        resTable := table.new(position=tablePos, columns=2, rows=16, bgcolor=color.new(#16163a, 0), border_color=color.new(#2a2a4a, 0), border_width=1)
+    
+    int totTrades = array.size(trade_profits)
+    int wins = 0
+    float netProfit = 0.0
+    float grossWins = 0.0
+    float grossLosses = 0.0
+    float maxGain = 0.0
+    float maxLoss = 0.0
+    
+    float maxDD = 0.0
+    float peak = 0.0
+    float current_equity = 0.0
+    
+    if totTrades > 0
+        for i = 0 to totTrades - 1
+            float p = array.get(trade_profits, i)
+            netProfit += p
+            current_equity += p
+            
+            if p > 0
+                wins += 1
+                grossWins += p
+            else
+                grossLosses += math.abs(p)
+                
+            if p > maxGain
+                maxGain := p
+            if p < maxLoss
+                maxLoss := p
+                
+            if current_equity > peak
+                peak := current_equity
+            float dd = peak - current_equity
+            if dd > maxDD
+                maxDD := dd
+                
+    float winRate = totTrades > 0 ? (wins / totTrades) * 100 : 0
+    float pf = grossLosses == 0 ? (grossWins > 0 ? 999.9 : 0.0) : grossWins / grossLosses
+    float expect = totTrades > 0 ? netProfit / totTrades : 0
+    
+    float start_time = autoOptimize ? nz(time[math.min(bar_index, optLookback) - 1], time[1]) : first_bar_time
+    float elapsedDays = (time - start_time) / 86400000
+    if elapsedDays == 0
+        elapsedDays := 1
+        
+    float tradesPerDay = totTrades / elapsedDays
+    float avgMonthly = (netProfit / elapsedDays) * 30.44
+    
+    float maxDD_val = maxDD
+    
+    color bgTitle = color.new(#12122a, 0)
+    color bgCell = color.new(#16163a, 0)
+    color textKey = color.new(#aaaacc, 0)
+    color colGreen = color.new(#00c853, 0)
+    color colRed = color.new(#ff1744, 0)
+    
+    string tSize = dashSize == "Tiny" ? size.tiny : dashSize == "Small" ? size.small : dashSize == "Normal" ? size.normal : dashSize == "Large" ? size.large : size.auto
+    
+    table.cell(resTable, 0, 0, autoOptimize ? "ðŸ“Š Optimized Results ðŸ“Š" : "ðŸ“Š Strategy Results ðŸ“Š", text_color=color.white, text_size=tSize, bgcolor=bgTitle)
+    table.merge_cells(resTable, 0, 0, 1, 0)
+    
+    color wrCol = winRate >= 50 ? colGreen : colRed
+    table.cell(resTable, 0, 1, "Win Rate", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 1, str.tostring(winRate, "#.##") + "% (" + str.tostring(wins) + "/" + str.tostring(totTrades) + ")", text_color=wrCol, text_size=tSize, bgcolor=bgCell)
+
+    color npCol = netProfit >= 0 ? colGreen : colRed
+    string npPrefix = netProfit >= 0 ? "+$" : "-$"
+    table.cell(resTable, 0, 2, "Net Profit", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 2, npPrefix + str.tostring(math.abs(netProfit), "#.##"), text_color=npCol, text_size=tSize, bgcolor=bgCell)
+
+    color pfCol = pf >= 1.5 ? colGreen : (pf >= 1.0 ? color.white : colRed)
+    string pfText = pf >= 999.0 ? "âˆž" : str.tostring(pf, "#.##")
+    table.cell(resTable, 0, 3, "Profit Factor", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 3, pfText, text_color=pfCol, text_size=tSize, bgcolor=bgCell)
+
+    color expCol = expect >= 0 ? colGreen : colRed
+    string expPrefix = expect >= 0 ? "+$" : "-$"
+    table.cell(resTable, 0, 4, "Expectancy", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 4, expPrefix + str.tostring(math.abs(expect), "#.##"), text_color=expCol, text_size=tSize, bgcolor=bgCell)
+
+    table.cell(resTable, 0, 5, "Trades / Day", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 5, str.tostring(tradesPerDay, "#.##"), text_color=color.white, text_size=tSize, bgcolor=bgCell)
+
+    color avgCol = avgMonthly >= 0 ? colGreen : colRed
+    string avgPrefix = avgMonthly >= 0 ? "+$" : "-$"
+    table.cell(resTable, 0, 6, "Avg Monthly", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 6, avgPrefix + str.tostring(math.abs(avgMonthly), "#.##"), text_color=avgCol, text_size=tSize, bgcolor=bgCell)
+
+    table.cell(resTable, 0, 7, "Target R:R", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 7, "1 : " + str.tostring(autoOptimize ? best_rr : targetRR, "#.#"), text_color=color.white, text_size=tSize, bgcolor=bgCell)
+
+    table.cell(resTable, 0, 8, "Max Gain", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 8, "+$" + str.tostring(maxGain, "#.##"), text_color=colGreen, text_size=tSize, bgcolor=bgCell)
+
+    table.cell(resTable, 0, 9, "Max Loss", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 9, "-$" + str.tostring(math.abs(maxLoss), "#.##"), text_color=colRed, text_size=tSize, bgcolor=bgCell)
+
+    table.cell(resTable, 0, 10, "Max Drawdown", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 10, "-$" + str.tostring(math.abs(maxDD), "#.##"), text_color=colRed, text_size=tSize, bgcolor=bgCell)
+
+    table.cell(resTable, 0, 11, "Opt. Signal MA", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 11, autoOptimize ? best_ma_type + " " + str.tostring(best_ma_length) : "Disabled", text_color=autoOptimize ? colGreen : color.white, text_size=tSize, bgcolor=bgCell)
+
+    table.cell(resTable, 0, 12, "Opt. Stop Loss", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 12, autoOptimize ? best_sl_type : "Disabled", text_color=autoOptimize ? colGreen : color.white, text_size=tSize, bgcolor=bgCell)
+
+    table.cell(resTable, 0, 13, "Opt. Target RR", text_color=textKey, text_size=tSize, bgcolor=bgCell)
+    table.cell(resTable, 1, 13, autoOptimize ? "1 : " + str.tostring(best_rr, "#.#") : "Disabled", text_color=autoOptimize ? colGreen : color.white, text_size=tSize, bgcolor=bgCell)
+
+    table.cell(resTable, 0, 14, "Debug: Combos", text_color=textKey, text_size=tSize, bgcolor=color.new(#1a1a2e, 0))
+    table.cell(resTable, 1, 14, str.tostring(debug_bf_evaluated) + "/" + str.tostring(debug_bf_total), text_color=color.new(#ffaa00, 0), text_size=tSize, bgcolor=color.new(#1a1a2e, 0))
+
+    table.cell(resTable, 0, 15, "Debug: Opt Metric", text_color=textKey, text_size=tSize, bgcolor=color.new(#1a1a2e, 0))
+    table.cell(resTable, 1, 15, str.tostring(debug_opt_metric, "#.##"), text_color=color.new(#ffaa00, 0), text_size=tSize, bgcolor=color.new(#1a1a2e, 0))
